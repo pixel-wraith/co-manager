@@ -36,8 +36,9 @@ Example:
 This will:
 1. Fetch all issues from the board's backlog
 2. Generate AI summaries for each issue
-3. Detect duplicates and overlapping issues
-4. Output results to `<BOARD_ID>-backlog-issues.json`
+3. Estimate priority for each issue
+4. Detect duplicates and overlapping issues
+5. Output results to `<BOARD_ID>-backlog-issues.json`
 
 ## Scripts
 
@@ -52,6 +53,7 @@ The main pipeline script that runs all analysis steps in sequence.
 Outputs a summary after each step and a final report with:
 - Total issues retrieved
 - Summaries generated
+- Priorities estimated (with distribution breakdown)
 - Duplicate and overlap relationships found
 
 ### fetch-jira-backlog.sh
@@ -78,6 +80,21 @@ Generates concise AI summaries for each issue using Claude.
 - Adds `__summary` property to each issue
 - Skips already-summarized issues (idempotent)
 
+### estimate-priorities.sh
+
+Estimates priority for each issue using Claude based on the issue content.
+
+```bash
+./estimate-priorities.sh <BACKLOG_JSON_FILE>
+```
+
+- Analyzes issue summary to estimate business priority
+- Uses standard Jira priority levels: Highest, High, Medium, Low, Lowest
+- Considers factors like business impact, urgency, and user impact
+- Adds `__priority` property to each issue
+- Skips already-estimated issues (idempotent)
+- Outputs priority distribution summary
+
 ### detect-duplicates.sh
 
 Analyzes all issue summaries to identify duplicates and overlaps.
@@ -99,6 +116,7 @@ The output JSON file contains:
   "boardId": "123",
   "fetchedAt": "2026-03-06T12:00:00Z",
   "summarizedAt": "2026-03-06T12:05:00Z",
+  "prioritiesEstimatedAt": "2026-03-06T12:07:00Z",
   "duplicatesAnalyzedAt": "2026-03-06T12:10:00Z",
   "totalIssues": 50,
   "issues": [
@@ -109,6 +127,7 @@ The output JSON file contains:
         "description": "Issue description..."
       },
       "__summary": "AI-generated concise summary of the issue.",
+      "__priority": "High",
       "duplicates": ["PROJ-456"],
       "overlaps_with": [
         {

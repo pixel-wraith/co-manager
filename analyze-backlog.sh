@@ -5,7 +5,8 @@
 # Runs the full backlog analysis pipeline:
 #   1. Fetch all issues from a Jira board's backlog
 #   2. Generate AI summaries for each issue
-#   3. Detect duplicates and overlapping issues
+#   3. Estimate priority for each issue
+#   4. Detect duplicates and overlapping issues
 #
 # Required environment variables:
 #   JIRA_BASE_URL  - Your Jira instance URL (e.g., https://yourcompany.atlassian.net)
@@ -96,10 +97,36 @@ echo "----------------------------------------------"
 echo ""
 
 # ---------------------------------------------
-# Step 3: Detect duplicates and overlaps
+# Step 3: Estimate priorities for each issue
 # ---------------------------------------------
 echo "=============================================="
-echo "  Step 3: Detecting Duplicates & Overlaps"
+echo "  Step 3: Estimating Priorities"
+echo "=============================================="
+echo ""
+
+"${SCRIPT_DIR}/estimate-priorities.sh" "$OUTPUT_FILE"
+
+# Print summary for Step 3
+issues_with_priority=$(jq '[.issues[] | select(.__priority != null)] | length' "$OUTPUT_FILE")
+echo ""
+echo "----------------------------------------------"
+echo "  STEP 3 SUMMARY"
+echo "----------------------------------------------"
+echo "  Priorities estimated for: $issues_with_priority issues"
+priority_highest=$(jq '[.issues[] | select(.__priority == "Highest")] | length' "$OUTPUT_FILE")
+priority_high=$(jq '[.issues[] | select(.__priority == "High")] | length' "$OUTPUT_FILE")
+priority_medium=$(jq '[.issues[] | select(.__priority == "Medium")] | length' "$OUTPUT_FILE")
+priority_low=$(jq '[.issues[] | select(.__priority == "Low")] | length' "$OUTPUT_FILE")
+priority_lowest=$(jq '[.issues[] | select(.__priority == "Lowest")] | length' "$OUTPUT_FILE")
+echo "  Distribution: $priority_highest Highest, $priority_high High, $priority_medium Medium, $priority_low Low, $priority_lowest Lowest"
+echo "----------------------------------------------"
+echo ""
+
+# ---------------------------------------------
+# Step 4: Detect duplicates and overlaps
+# ---------------------------------------------
+echo "=============================================="
+echo "  Step 4: Detecting Duplicates & Overlaps"
 echo "=============================================="
 echo ""
 
@@ -119,7 +146,7 @@ total_overlap_relationships=$((total_overlap_relationships / 2))
 
 echo ""
 echo "----------------------------------------------"
-echo "  STEP 3 SUMMARY"
+echo "  STEP 4 SUMMARY"
 echo "----------------------------------------------"
 echo "  Issues flagged as duplicates: $duplicate_issues"
 echo "  Issues flagged with overlaps: $overlap_issues"
@@ -138,8 +165,12 @@ echo ""
 echo "  Board ID:                  $BOARD_ID"
 echo "  Total issues retrieved:    $total_issues"
 echo "  Summaries generated:       $issues_with_summary"
+echo "  Priorities estimated:      $issues_with_priority"
 echo "  Duplicate relationships:   $total_duplicate_relationships"
 echo "  Overlap relationships:     $total_overlap_relationships"
+echo ""
+echo "  Priority breakdown:"
+echo "    Highest: $priority_highest | High: $priority_high | Medium: $priority_medium | Low: $priority_low | Lowest: $priority_lowest"
 echo ""
 echo "  Output file: $OUTPUT_FILE"
 echo ""
