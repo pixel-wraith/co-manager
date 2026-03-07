@@ -20,17 +20,53 @@ export JIRA_API_TOKEN="your-api-token"
 
 Generate your Jira API token at: https://id.atlassian.com/manage-profile/security/api-tokens
 
+### Global Alias (macOS)
+
+To run `process-backlog` from any directory, add an alias to your shell configuration:
+
+1. Open your shell config file:
+   ```bash
+   # For zsh (default on macOS)
+   open -e ~/.zshrc
+
+   # For bash
+   open -e ~/.bash_profile
+   ```
+
+2. Add the following line (update the path to match your installation):
+   ```bash
+   alias process-backlog="/path/to/co-manager/process-backlog.sh"
+   ```
+
+3. Reload your shell configuration:
+   ```bash
+   # For zsh
+   source ~/.zshrc
+
+   # For bash
+   source ~/.bash_profile
+   ```
+
+4. Now you can run the pipeline from anywhere:
+   ```bash
+   process-backlog 123
+   ```
+
+## Data Directory
+
+All output files are stored in `~/.co-manager/`. This directory is created automatically when you run the pipeline.
+
 ## Quick Start
 
 Run the full analysis pipeline with a single command:
 
 ```bash
-./analyze-backlog.sh <BOARD_ID>
+./process-backlog.sh <BOARD_ID>
 ```
 
 Example:
 ```bash
-./analyze-backlog.sh 123
+./process-backlog.sh 123
 ```
 
 This will:
@@ -38,16 +74,16 @@ This will:
 2. Generate AI summaries for each issue
 3. Estimate priority for each issue
 4. Detect duplicates and overlapping issues
-5. Output results to `<BOARD_ID>-backlog-issues.json`
+5. Output results to `~/.co-manager/<BOARD_ID>-backlog-issues.json`
 
 ## Scripts
 
-### analyze-backlog.sh
+### process-backlog.sh
 
 The main pipeline script that runs all analysis steps in sequence.
 
 ```bash
-./analyze-backlog.sh <BOARD_ID>
+./process-backlog.sh <BOARD_ID>
 ```
 
 Outputs a summary after each step and a final report with:
@@ -65,7 +101,7 @@ Fetches all issues from a Jira board's backlog using the Jira REST API.
 ```
 
 - Handles pagination automatically
-- Outputs to `<BOARD_ID>-backlog-issues.json`
+- Outputs to `~/.co-manager/<BOARD_ID>-backlog-issues.json`
 
 ### summarize-backlog-issues.sh
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Analyze Jira Backlog - Complete Pipeline
+# Process Jira Backlog - Complete Pipeline
 #
-# Runs the full backlog analysis pipeline:
+# Runs the full backlog processing pipeline:
 #   1. Fetch all issues from a Jira board's backlog
 #   2. Generate AI summaries for each issue
 #   3. Estimate priority for each issue
@@ -19,10 +19,10 @@
 #   - curl installed
 #
 # Usage:
-#   ./analyze-backlog.sh <BOARD_ID>
+#   ./process-backlog.sh <BOARD_ID>
 #
 # Example:
-#   ./analyze-backlog.sh 123
+#   ./process-backlog.sh 123
 #
 
 set -euo pipefail
@@ -32,6 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Configuration
 BOARD_ID="${1:-}"
+DATA_DIR="${HOME}/.co-manager"
 
 # Validate inputs
 if [[ -z "$BOARD_ID" ]]; then
@@ -40,10 +41,13 @@ if [[ -z "$BOARD_ID" ]]; then
     exit 1
 fi
 
-OUTPUT_FILE="${BOARD_ID}-backlog-issues.json"
+# Create data directory if it doesn't exist
+mkdir -p "$DATA_DIR"
+
+OUTPUT_FILE="${DATA_DIR}/${BOARD_ID}-backlog-issues.json"
 
 echo "=============================================="
-echo "  Jira Backlog Analysis Pipeline"
+echo "  Jira Backlog Processing Pipeline"
 echo "=============================================="
 echo ""
 echo "Board ID: $BOARD_ID"

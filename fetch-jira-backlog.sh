@@ -19,6 +19,7 @@ set -euo pipefail
 # Configuration
 BOARD_ID="${1:-}"
 MAX_RESULTS=100  # Jira's max per request
+DATA_DIR="${HOME}/.co-manager"
 
 # Validate inputs
 if [[ -z "$BOARD_ID" ]]; then
@@ -26,6 +27,9 @@ if [[ -z "$BOARD_ID" ]]; then
     echo "Usage: $0 <BOARD_ID>"
     exit 1
 fi
+
+# Create data directory if it doesn't exist
+mkdir -p "$DATA_DIR"
 
 if [[ -z "${JIRA_BASE_URL:-}" ]]; then
     echo "Error: JIRA_BASE_URL environment variable is not set"
@@ -46,7 +50,7 @@ fi
 JIRA_BASE_URL="${JIRA_BASE_URL%/}"
 
 # Output file
-OUTPUT_FILE="${BOARD_ID}-backlog-issues.json"
+OUTPUT_FILE="${DATA_DIR}/${BOARD_ID}-backlog-issues.json"
 
 # Build auth header (Base64 encoded email:token)
 AUTH_HEADER=$(echo -n "${JIRA_EMAIL}:${JIRA_API_TOKEN}" | base64)
