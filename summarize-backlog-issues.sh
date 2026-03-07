@@ -50,7 +50,8 @@ json_content=$(cat "$INPUT_FILE")
 
 # Get the number of issues
 issue_count=$(echo "$json_content" | jq '.issues | length')
-echo "Found $issue_count issues to summarize"
+unprocessed_count=$(echo "$json_content" | jq '[.issues[] | select(.__processed != true)] | length')
+echo "Found $issue_count total issues ($unprocessed_count unprocessed)"
 
 # Create a temporary file for building the updated JSON
 temp_file=$(mktemp)
@@ -62,6 +63,7 @@ echo "$json_content" | jq 'del(.issues)' > "$temp_file"
 # Process each issue
 echo "Processing issues..."
 updated_issues="[]"
+summarized_count=0
 
 for i in $(seq 0 $((issue_count - 1))); do
     # Extract issue details
@@ -94,10 +96,10 @@ for i in $(seq 0 $((issue_count - 1))); do
 
     echo "  [$((i + 1))/$issue_count] Summarizing $issue_key: $title"
 
-    # Check if already summarized
-    existing_summary=$(echo "$issue" | jq -r '.__summary // empty')
-    if [[ -n "$existing_summary" ]]; then
-        echo "    Skipping (already summarized)"
+    # Check if already processed
+    is_processed=$(echo "$issue" | jq -r '.__processed // false')
+    if [[ "$is_processed" == "true" ]]; then
+        echo "    Skipping (already processed)"
         updated_issues=$(echo "$updated_issues" | jq --argjson issue "$issue" '. + [$issue]')
         continue
     fi
@@ -123,6 +125,7 @@ Provide only the summary, no preamble or extra text."
 
     # Append to our collection
     updated_issues=$(echo "$updated_issues" | jq --argjson issue "$updated_issue" '. + [$issue]')
+    ((summarized_count++))
 
     echo "    Summary: ${summary:0:80}..."
 done
@@ -137,5 +140,5 @@ final_json=$(echo "$final_json" | jq --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 echo "$final_json" > "$INPUT_FILE"
 
 echo ""
-echo "Successfully summarized $issue_count issues"
+echo "Successfully summarized $summarized_count issues (skipped $((issue_count - summarized_count)) already processed)"
 echo "Updated file: $INPUT_FILE"

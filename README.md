@@ -56,6 +56,16 @@ To run `process-backlog` from any directory, add an alias to your shell configur
 
 All output files are stored in `~/.co-manager/`. This directory is created automatically when you run the pipeline.
 
+## Incremental Processing
+
+The pipeline supports incremental processing, making it efficient to run repeatedly:
+
+- **New issues** are fully processed (summary, priority, duplicate detection)
+- **Unchanged issues** are skipped (marked with `__processed: true`)
+- **Changed issues** are automatically re-processed when their content changes in Jira
+- **Completed issues** (removed from Jira backlog) are automatically removed from the local file
+- **Stale references** are cleaned up (e.g., if issue A was a duplicate of B, and B is completed, the reference is removed from A)
+
 ## Quick Start
 
 Run the full analysis pipeline with a single command:
@@ -101,6 +111,9 @@ Fetches all issues from a Jira board's backlog using the Jira REST API.
 ```
 
 - Handles pagination automatically
+- Merges with existing local data, preserving processed state
+- Detects content changes and marks changed issues for re-processing
+- Removes issues no longer in the Jira backlog
 - Outputs to `~/.co-manager/<BOARD_ID>-backlog-issues.json`
 
 ### summarize-backlog-issues.sh
@@ -114,7 +127,7 @@ Generates concise AI summaries for each issue using Claude.
 - Extracts title and description from each issue
 - Handles both plain text and Atlassian Document Format (ADF)
 - Adds `__summary` property to each issue
-- Skips already-summarized issues (idempotent)
+- Skips already-processed issues (`__processed: true`)
 
 ### estimate-priorities.sh
 
@@ -128,7 +141,7 @@ Estimates priority for each issue using Claude based on the issue content.
 - Uses standard Jira priority levels: Highest, High, Medium, Low, Lowest
 - Considers factors like business impact, urgency, and user impact
 - Adds `__priority` property to each issue
-- Skips already-estimated issues (idempotent)
+- Skips already-processed issues (`__processed: true`)
 - Outputs priority distribution summary
 
 ### detect-duplicates.sh
@@ -139,9 +152,11 @@ Analyzes all issue summaries to identify duplicates and overlaps.
 ./detect-duplicates.sh <BACKLOG_JSON_FILE>
 ```
 
-- Sends all summaries to Claude for analysis
+- Compares unprocessed issues against ALL issues (new and existing)
 - Adds `duplicates` array for exact duplicate issues
 - Adds `overlaps_with` array for related issues with overlap details
+- Updates both sides of any relationship found
+- Cleans up stale references (removes IDs that no longer exist)
 
 ## Output Format
 
@@ -154,14 +169,17 @@ The output JSON file contains:
   "summarizedAt": "2026-03-06T12:05:00Z",
   "prioritiesEstimatedAt": "2026-03-06T12:07:00Z",
   "duplicatesAnalyzedAt": "2026-03-06T12:10:00Z",
+  "processedAt": "2026-03-06T12:10:00Z",
   "totalIssues": 50,
   "issues": [
     {
       "key": "PROJ-123",
       "fields": {
         "summary": "Issue title",
-        "description": "Issue description..."
+        "description": "Issue description...",
+        "updated": "2026-03-06T10:00:00.000+0000"
       },
+      "__processed": true,
       "__summary": "AI-generated concise summary of the issue.",
       "__priority": "High",
       "duplicates": ["PROJ-456"],

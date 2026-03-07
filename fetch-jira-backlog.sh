@@ -112,11 +112,84 @@ done
 # Get the final count
 final_count=$(echo "$all_issues" | jq 'length')
 
+# Check if we have existing data to merge with
+if [[ -f "$OUTPUT_FILE" ]]; then
+    echo "Merging with existing data..."
+    existing_data=$(cat "$OUTPUT_FILE")
+
+    # Merge fresh issues with existing data, preserving custom properties
+    # and detecting content changes
+    merged_issues=$(jq -n \
+        --argjson fresh "$all_issues" \
+        --argjson existing "$(echo "$existing_data" | jq '.issues // []')" \
+        '
+        # Build a map of existing issues by key
+        ($existing | map({key: .key, value: .}) | from_entries) as $existing_map |
+
+        # Process each fresh issue
+        [
+            $fresh[] |
+            .key as $key |
+
+            # Check if this issue exists in our local data
+            if $existing_map[$key] then
+                # Get the existing issue
+                $existing_map[$key] as $old |
+
+                # Check if content has changed (compare updated timestamp)
+                if .fields.updated != $old.fields.updated then
+                    # Content changed - merge fresh data but clear __processed flag
+                    . + {
+                        __summary: null,
+                        __priority: null,
+                        __processed: false,
+                        duplicates: null,
+                        overlaps_with: null
+                    }
+                else
+                    # Content unchanged - preserve all custom properties
+                    . + {
+                        __summary: $old.__summary,
+                        __priority: $old.__priority,
+                        __processed: ($old.__processed // false),
+                        duplicates: $old.duplicates,
+                        overlaps_with: $old.overlaps_with
+                    }
+                end
+            else
+                # New issue - mark as unprocessed
+                . + {__processed: false}
+            end
+        ]
+        ')
+
+    # Count statistics
+    new_count=$(echo "$merged_issues" | jq '[.[] | select(.__processed == false and .__summary == null)] | length')
+    changed_count=$(echo "$merged_issues" | jq '[.[] | select(.__processed == false and .__summary != null)] | length')
+    preserved_count=$(echo "$merged_issues" | jq '[.[] | select(.__processed == true)] | length')
+    removed_count=$(echo "$existing_data" | jq --argjson fresh "$all_issues" '
+        [.issues[].key] as $old_keys |
+        [$fresh[].key] as $new_keys |
+        [$old_keys[] | select(. as $k | $new_keys | index($k) | not)] | length
+    ')
+
+    echo "  New issues: $new_count"
+    echo "  Changed issues (will reprocess): $changed_count"
+    echo "  Unchanged issues (preserved): $preserved_count"
+    echo "  Removed issues (completed): $removed_count"
+
+    all_issues="$merged_issues"
+else
+    echo "No existing data found, creating new file..."
+    # Mark all issues as unprocessed
+    all_issues=$(echo "$all_issues" | jq '[.[] | . + {__processed: false}]')
+fi
+
 # Build the final output JSON
 output_json=$(jq -n \
     --arg board_id "$BOARD_ID" \
     --arg fetched_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-    --argjson total "$total" \
+    --argjson total "$final_count" \
     --argjson issues "$all_issues" \
     '{
         boardId: $board_id,

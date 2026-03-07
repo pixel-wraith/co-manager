@@ -66,11 +66,15 @@ echo ""
 
 # Print summary for Step 1
 total_issues=$(jq '.totalIssues' "$OUTPUT_FILE")
+unprocessed_issues=$(jq '[.issues[] | select(.__processed != true)] | length' "$OUTPUT_FILE")
+processed_issues=$(jq '[.issues[] | select(.__processed == true)] | length' "$OUTPUT_FILE")
 echo ""
 echo "----------------------------------------------"
 echo "  STEP 1 SUMMARY"
 echo "----------------------------------------------"
-echo "  Total issues retrieved from Jira: $total_issues"
+echo "  Total issues in backlog: $total_issues"
+echo "  Already processed: $processed_issues"
+echo "  To be processed: $unprocessed_issues"
 echo "----------------------------------------------"
 echo ""
 
@@ -160,6 +164,29 @@ echo "----------------------------------------------"
 echo ""
 
 # ---------------------------------------------
+# Step 5: Mark processed issues
+# ---------------------------------------------
+echo "=============================================="
+echo "  Step 5: Marking Issues as Processed"
+echo "=============================================="
+echo ""
+
+# Count unprocessed issues before marking
+unprocessed_before=$(jq '[.issues[] | select(.__processed != true)] | length' "$OUTPUT_FILE")
+
+# Mark all unprocessed issues as processed
+jq '.issues = [.issues[] | if .__processed != true then . + {__processed: true} else . end] | . + {processedAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))}' "$OUTPUT_FILE" > "${OUTPUT_FILE}.tmp" && mv "${OUTPUT_FILE}.tmp" "$OUTPUT_FILE"
+
+echo "Marked $unprocessed_before issues as processed"
+echo ""
+echo "----------------------------------------------"
+echo "  STEP 5 SUMMARY"
+echo "----------------------------------------------"
+echo "  Newly processed issues: $unprocessed_before"
+echo "----------------------------------------------"
+echo ""
+
+# ---------------------------------------------
 # Final Summary
 # ---------------------------------------------
 echo "=============================================="
@@ -167,9 +194,9 @@ echo "  PIPELINE COMPLETE"
 echo "=============================================="
 echo ""
 echo "  Board ID:                  $BOARD_ID"
-echo "  Total issues retrieved:    $total_issues"
-echo "  Summaries generated:       $issues_with_summary"
-echo "  Priorities estimated:      $issues_with_priority"
+echo "  Total issues in backlog:   $total_issues"
+echo "  Newly processed:           $unprocessed_before"
+echo "  Previously processed:      $processed_issues"
 echo "  Duplicate relationships:   $total_duplicate_relationships"
 echo "  Overlap relationships:     $total_overlap_relationships"
 echo ""

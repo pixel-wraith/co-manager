@@ -48,37 +48,93 @@ fi
 echo "Reading issues from: $INPUT_FILE"
 json_content=$(cat "$INPUT_FILE")
 
-# Get the number of issues
+# Get issue counts
 issue_count=$(echo "$json_content" | jq '.issues | length')
-echo "Found $issue_count issues to analyze"
+unprocessed_count=$(echo "$json_content" | jq '[.issues[] | select(.__processed != true)] | length')
+echo "Found $issue_count total issues ($unprocessed_count unprocessed)"
+
+# First, clean up stale references from existing issues
+echo "Cleaning up stale references..."
+all_issue_keys=$(echo "$json_content" | jq -c '[.issues[].key]')
+
+json_content=$(echo "$json_content" | jq --argjson valid_keys "$all_issue_keys" '
+    .issues = [.issues[] |
+        # Clean up duplicates array - remove IDs that no longer exist
+        if .duplicates then
+            .duplicates = [.duplicates[] | select(. as $id | $valid_keys | index($id))]
+        else
+            .
+        end |
+        # Remove empty duplicates array
+        if .duplicates and (.duplicates | length) == 0 then
+            del(.duplicates)
+        else
+            .
+        end |
+        # Clean up overlaps_with array - remove entries with IDs that no longer exist
+        if .overlaps_with then
+            .overlaps_with = [.overlaps_with[] | select(.id as $id | $valid_keys | index($id))]
+        else
+            .
+        end |
+        # Remove empty overlaps_with array
+        if .overlaps_with and (.overlaps_with | length) == 0 then
+            del(.overlaps_with)
+        else
+            .
+        end
+    ]
+')
+
+# Check if we have unprocessed issues to analyze
+if [[ $unprocessed_count -eq 0 ]]; then
+    echo "No unprocessed issues to analyze."
+    # Still write back to save any stale reference cleanup
+    echo "$json_content" > "$INPUT_FILE"
+    echo "Updated file: $INPUT_FILE"
+    exit 0
+fi
 
 if [[ $issue_count -lt 2 ]]; then
     echo "Need at least 2 issues to detect duplicates. Exiting."
     exit 0
 fi
 
-# Extract all issue IDs and summaries
-echo "Extracting issue summaries..."
-issues_for_analysis=$(echo "$json_content" | jq -r '
+# Extract unprocessed issues (the ones we need to analyze)
+echo "Extracting unprocessed issues for analysis..."
+unprocessed_issues=$(echo "$json_content" | jq -r '
+    [.issues[] | select(.__processed != true)] | to_entries | map({
+        index: .key,
+        id: .value.key,
+        summary: (.value.__summary // .value.fields.summary // "No summary available"),
+        is_new: true
+    })
+')
+
+# Extract all issues (for comparison context)
+all_issues_for_context=$(echo "$json_content" | jq -r '
     .issues | to_entries | map({
         index: .key,
         id: .value.key,
-        summary: (.value.__summary // .value.fields.summary // "No summary available")
+        summary: (.value.__summary // .value.fields.summary // "No summary available"),
+        is_new: (if .value.__processed == true then false else true end)
     })
 ')
 
 # Build the prompt for Claude
-echo "Analyzing issues for duplicates and overlaps..."
+echo "Analyzing unprocessed issues for duplicates and overlaps..."
 
-prompt="You are analyzing a list of Jira issues to identify duplicates and overlaps.
+prompt="You are analyzing Jira issues to identify duplicates and overlaps.
 
-Here are the issues with their IDs and summaries:
+Here are ALL issues in the backlog (for context):
+$all_issues_for_context
 
-$issues_for_analysis
+Here are the NEW/UNPROCESSED issues that need to be checked:
+$unprocessed_issues
 
-Analyze these issues and identify:
-1. DUPLICATES: Issues that describe the exact same work or requirement
-2. OVERLAPS: Issues that have related or similar requirements but are not exact duplicates
+Analyze the NEW/UNPROCESSED issues and identify:
+1. DUPLICATES: Where a new issue duplicates ANY other issue (new or existing)
+2. OVERLAPS: Where a new issue overlaps with ANY other issue (new or existing)
 
 Return your analysis as valid JSON in this exact format (no markdown, no code blocks, just raw JSON):
 {
@@ -97,6 +153,7 @@ Return your analysis as valid JSON in this exact format (no markdown, no code bl
 }
 
 Rules:
+- Only include relationships where AT LEAST ONE issue is from the NEW/UNPROCESSED list
 - Only include actual duplicates and overlaps you're confident about
 - Each issue can appear in multiple duplicate/overlap groups if applicable
 - If no duplicates are found, return an empty array for \"duplicates\"
@@ -142,12 +199,8 @@ overlap_count=$(echo "$overlaps" | jq 'length')
 echo "  Found $duplicate_count duplicate groups"
 echo "  Found $overlap_count overlap groups"
 
-# Process the issues and add the duplicate/overlap metadata
+# Process the issues and merge new relationship data with existing
 echo "Updating issues with relationship metadata..."
-
-# Build a map of issue relationships
-# For duplicates: each issue gets a list of other issue IDs it duplicates
-# For overlaps: each issue gets a list of {id, details} objects
 
 updated_json=$(echo "$json_content" | jq --argjson dups "$duplicates" --argjson overlaps "$overlaps" '
     # Build duplicate map: issue_id -> [other_ids]
@@ -174,15 +227,17 @@ updated_json=$(echo "$json_content" | jq --argjson dups "$duplicates" --argjson 
 
     .issues = [.issues[] |
         .key as $key |
-        # Add duplicates if any exist for this issue
+        # Merge new duplicates with existing (if any)
         if $dup_map[$key] and ($dup_map[$key] | length) > 0 then
-            . + {duplicates: $dup_map[$key]}
+            .duplicates = ((.duplicates // []) + $dup_map[$key]) | unique
         else
             .
         end |
-        # Add overlaps if any exist for this issue
+        # Merge new overlaps with existing (if any), avoiding duplicate entries
         if $overlap_map[$key] and ($overlap_map[$key] | length) > 0 then
-            . + {overlaps_with: $overlap_map[$key]}
+            (.overlaps_with // []) as $existing |
+            ($existing | map(.id)) as $existing_ids |
+            .overlaps_with = ($existing + [$overlap_map[$key][] | select(.id as $id | $existing_ids | index($id) | not)])
         else
             .
         end
@@ -195,7 +250,7 @@ updated_json=$(echo "$json_content" | jq --argjson dups "$duplicates" --argjson 
 echo "$updated_json" > "$INPUT_FILE"
 
 echo ""
-echo "Successfully analyzed $issue_count issues"
+echo "Successfully analyzed $unprocessed_count unprocessed issues against $issue_count total"
 echo "  - Duplicate groups found: $duplicate_count"
 echo "  - Overlap groups found: $overlap_count"
 echo "Updated file: $INPUT_FILE"

@@ -53,7 +53,8 @@ json_content=$(cat "$INPUT_FILE")
 
 # Get the number of issues
 issue_count=$(echo "$json_content" | jq '.issues | length')
-echo "Found $issue_count issues to estimate priorities for"
+unprocessed_count=$(echo "$json_content" | jq '[.issues[] | select(.__processed != true)] | length')
+echo "Found $issue_count total issues ($unprocessed_count unprocessed)"
 
 # Process each issue
 echo "Estimating priorities..."
@@ -74,10 +75,10 @@ for i in $(seq 0 $((issue_count - 1))); do
 
     echo "  [$((i + 1))/$issue_count] Estimating priority for $issue_key"
 
-    # Check if already estimated
-    existing_estimate=$(echo "$issue" | jq -r '.__priority // empty')
-    if [[ -n "$existing_estimate" ]]; then
-        echo "    Skipping (already estimated: $existing_estimate)"
+    # Check if already processed
+    is_processed=$(echo "$issue" | jq -r '.__processed // false')
+    if [[ "$is_processed" == "true" ]]; then
+        echo "    Skipping (already processed)"
         updated_issues=$(echo "$updated_issues" | jq --argjson issue "$issue" '. + [$issue]')
         continue
     fi
@@ -153,5 +154,5 @@ for priority in "${VALID_PRIORITIES[@]}"; do
 done
 
 echo ""
-echo "Successfully estimated priorities for $estimated_count issues"
+echo "Successfully estimated priorities for $estimated_count issues (skipped $((issue_count - estimated_count)) already processed)"
 echo "Updated file: $INPUT_FILE"
