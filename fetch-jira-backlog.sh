@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Fetch all issues from a Jira board's backlog
+# Fetch all issues from a Jira board's active and future sprints
 #
 # Required environment variables:
 #   JIRA_BASE_URL  - Your Jira instance URL (e.g., https://yourcompany.atlassian.net)
@@ -52,6 +52,16 @@ JIRA_BASE_URL="${JIRA_BASE_URL%/}"
 # Output file
 OUTPUT_FILE="${DATA_DIR}/${BOARD_ID}-backlog-issues.json"
 
+# Temp files for handling large JSON data
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
+
+FRESH_ISSUES_FILE="${TEMP_DIR}/fresh_issues.json"
+MERGED_ISSUES_FILE="${TEMP_DIR}/merged_issues.json"
+
+# Initialize fresh issues file
+echo '[]' > "$FRESH_ISSUES_FILE"
+
 # Build auth header (Base64 encoded email:token)
 AUTH_HEADER=$(echo -n "${JIRA_EMAIL}:${JIRA_API_TOKEN}" | base64)
 
@@ -64,71 +74,107 @@ jira_request() {
         "${JIRA_BASE_URL}${endpoint}"
 }
 
-echo "Fetching backlog issues for board ${BOARD_ID}..."
+# Helper function to paginate through all issues for a given endpoint
+# Writes results directly to a temp file to avoid shell variable size limits
+fetch_sprint_issues() {
+    local endpoint="$1"
+    local sprint_file="${TEMP_DIR}/sprint_issues.json"
+    local start_at=0
+    local total=0
+    local first_request=true
 
-# Initialize variables for pagination
-start_at=0
-total=0
-all_issues="[]"
-first_request=true
+    echo '[]' > "$sprint_file"
 
-# Paginate through all results
-while true; do
-    echo "  Fetching issues starting at ${start_at}..."
+    while true; do
+        local separator="?"
+        if [[ "$endpoint" == *"?"* ]]; then
+            separator="&"
+        fi
 
-    # Fetch a page of issues
-    response=$(jira_request "/rest/agile/1.0/board/${BOARD_ID}/backlog?startAt=${start_at}&maxResults=${MAX_RESULTS}")
+        local response
+        response=$(jira_request "${endpoint}${separator}startAt=${start_at}&maxResults=${MAX_RESULTS}")
 
-    # Check for errors
-    if echo "$response" | jq -e '.errorMessages' > /dev/null 2>&1; then
-        echo "Error from Jira API:"
-        echo "$response" | jq -r '.errorMessages[]'
-        exit 1
-    fi
+        # Check for errors
+        if echo "$response" | jq -e '.errorMessages' > /dev/null 2>&1; then
+            echo "    Error from Jira API:"
+            echo "$response" | jq -r '.errorMessages[]'
+            return 1
+        fi
 
-    # On first request, get the total count
-    if [[ "$first_request" == "true" ]]; then
-        total=$(echo "$response" | jq -r '.total // 0')
-        echo "  Total issues in backlog: ${total}"
-        first_request=false
-    fi
+        # On first request, get the total count
+        if [[ "$first_request" == "true" ]]; then
+            total=$(echo "$response" | jq -r '.total // 0')
+            first_request=false
+        fi
 
-    # Extract issues from this page
-    page_issues=$(echo "$response" | jq -c '.issues // []')
-    page_count=$(echo "$page_issues" | jq 'length')
+        # Extract issues from this page and append to sprint file
+        local page_file="${TEMP_DIR}/page.json"
+        echo "$response" | jq -c '.issues // []' > "$page_file"
+        local page_count
+        page_count=$(jq 'length' "$page_file")
 
-    # Merge issues into our collection
-    all_issues=$(echo "$all_issues" "$page_issues" | jq -s 'add')
+        # Merge page into sprint file
+        jq -s 'add' "$sprint_file" "$page_file" > "${sprint_file}.tmp" && mv "${sprint_file}.tmp" "$sprint_file"
 
-    # Calculate next start position
-    start_at=$((start_at + MAX_RESULTS))
+        # Calculate next start position
+        start_at=$((start_at + MAX_RESULTS))
 
-    # Check if we've fetched all issues
-    if [[ $start_at -ge $total ]] || [[ $page_count -eq 0 ]]; then
-        break
-    fi
+        # Check if we've fetched all issues
+        if [[ $start_at -ge $total ]] || [[ $page_count -eq 0 ]]; then
+            break
+        fi
+    done
+}
+
+echo "Fetching issues for board ${BOARD_ID}..."
+
+# Step 1: Get all active and future sprints
+echo "  Fetching active and future sprints..."
+sprints_response=$(jira_request "/rest/agile/1.0/board/${BOARD_ID}/sprint?state=active,future&maxResults=50")
+
+if echo "$sprints_response" | jq -e '.errorMessages' > /dev/null 2>&1; then
+    echo "Error from Jira API:"
+    echo "$sprints_response" | jq -r '.errorMessages[]'
+    exit 1
+fi
+
+sprint_count=$(echo "$sprints_response" | jq '.values | length')
+echo "  Found $sprint_count active/future sprints"
+
+# Step 2: Fetch issues from each sprint
+for i in $(seq 0 $((sprint_count - 1))); do
+    sprint_id=$(echo "$sprints_response" | jq -r ".values[$i].id")
+    sprint_name=$(echo "$sprints_response" | jq -r ".values[$i].name")
+    sprint_state=$(echo "$sprints_response" | jq -r ".values[$i].state")
+
+    echo "  Fetching issues from sprint: $sprint_name ($sprint_state)..."
+    fetch_sprint_issues "/rest/agile/1.0/sprint/${sprint_id}/issue"
+
+    sprint_issue_count=$(jq 'length' "${TEMP_DIR}/sprint_issues.json")
+    echo "    Found $sprint_issue_count issues"
+
+    # Merge sprint issues into all issues
+    jq -s 'add' "$FRESH_ISSUES_FILE" "${TEMP_DIR}/sprint_issues.json" > "${FRESH_ISSUES_FILE}.tmp" && mv "${FRESH_ISSUES_FILE}.tmp" "$FRESH_ISSUES_FILE"
 done
 
+# Deduplicate issues by key (in case an issue appears in multiple sprints)
+jq '[group_by(.key)[] | .[0]]' "$FRESH_ISSUES_FILE" > "${FRESH_ISSUES_FILE}.tmp" && mv "${FRESH_ISSUES_FILE}.tmp" "$FRESH_ISSUES_FILE"
+
 # Get the final count
-final_count=$(echo "$all_issues" | jq 'length')
+final_count=$(jq 'length' "$FRESH_ISSUES_FILE")
 
 # Check if we have existing data to merge with
 if [[ -f "$OUTPUT_FILE" ]]; then
     echo "Merging with existing data..."
-    existing_data=$(cat "$OUTPUT_FILE")
 
     # Merge fresh issues with existing data, preserving custom properties
-    # and detecting content changes
-    merged_issues=$(jq -n \
-        --argjson fresh "$all_issues" \
-        --argjson existing "$(echo "$existing_data" | jq '.issues // []')" \
-        '
+    jq --slurpfile existing <(jq '.issues // []' "$OUTPUT_FILE") '
         # Build a map of existing issues by key
-        ($existing | map({key: .key, value: .}) | from_entries) as $existing_map |
+        ($existing[0] | map({key: .key, value: .}) | from_entries) as $existing_map |
 
         # Process each fresh issue
         [
-            $fresh[] |
+            .[] |
             .key as $key |
 
             # Check if this issue exists in our local data
@@ -161,45 +207,42 @@ if [[ -f "$OUTPUT_FILE" ]]; then
                 . + {__processed: false}
             end
         ]
-        ')
+    ' "$FRESH_ISSUES_FILE" > "$MERGED_ISSUES_FILE"
 
     # Count statistics
-    new_count=$(echo "$merged_issues" | jq '[.[] | select(.__processed == false and .__summary == null)] | length')
-    changed_count=$(echo "$merged_issues" | jq '[.[] | select(.__processed == false and .__summary != null)] | length')
-    preserved_count=$(echo "$merged_issues" | jq '[.[] | select(.__processed == true)] | length')
-    removed_count=$(echo "$existing_data" | jq --argjson fresh "$all_issues" '
+    new_count=$(jq '[.[] | select(.__processed == false and .__summary == null)] | length' "$MERGED_ISSUES_FILE")
+    changed_count=$(jq '[.[] | select(.__processed == false and .__summary != null)] | length' "$MERGED_ISSUES_FILE")
+    preserved_count=$(jq '[.[] | select(.__processed == true)] | length' "$MERGED_ISSUES_FILE")
+    removed_count=$(jq --slurpfile fresh "$FRESH_ISSUES_FILE" '
         [.issues[].key] as $old_keys |
-        [$fresh[].key] as $new_keys |
+        [$fresh[0][].key] as $new_keys |
         [$old_keys[] | select(. as $k | $new_keys | index($k) | not)] | length
-    ')
+    ' "$OUTPUT_FILE")
 
     echo "  New issues: $new_count"
     echo "  Changed issues (will reprocess): $changed_count"
     echo "  Unchanged issues (preserved): $preserved_count"
     echo "  Removed issues (completed): $removed_count"
 
-    all_issues="$merged_issues"
+    cp "$MERGED_ISSUES_FILE" "$FRESH_ISSUES_FILE"
 else
     echo "No existing data found, creating new file..."
     # Mark all issues as unprocessed
-    all_issues=$(echo "$all_issues" | jq '[.[] | . + {__processed: false}]')
+    jq '[.[] | . + {__processed: false}]' "$FRESH_ISSUES_FILE" > "${FRESH_ISSUES_FILE}.tmp" && mv "${FRESH_ISSUES_FILE}.tmp" "$FRESH_ISSUES_FILE"
 fi
 
 # Build the final output JSON
-output_json=$(jq -n \
+jq -n \
     --arg board_id "$BOARD_ID" \
     --arg fetched_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     --argjson total "$final_count" \
-    --argjson issues "$all_issues" \
+    --slurpfile issues "$FRESH_ISSUES_FILE" \
     '{
         boardId: $board_id,
         fetchedAt: $fetched_at,
         totalIssues: $total,
-        issues: $issues
-    }')
-
-# Write to file
-echo "$output_json" > "$OUTPUT_FILE"
+        issues: $issues[0]
+    }' > "$OUTPUT_FILE"
 
 echo "Successfully fetched ${final_count} issues"
 echo "Output written to: ${OUTPUT_FILE}"

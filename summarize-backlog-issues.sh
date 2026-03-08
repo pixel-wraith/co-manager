@@ -115,7 +115,7 @@ $description
 Provide only the summary, no preamble or extra text."
 
     # Call Claude to generate summary
-    summary=$(claude -p "$prompt" 2>/dev/null || echo "Failed to generate summary")
+    summary=$(env -u CLAUDECODE claude -p "$prompt" 2>/dev/null || echo "Failed to generate summary")
 
     # Clean up the summary (remove leading/trailing whitespace)
     summary=$(echo "$summary" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')

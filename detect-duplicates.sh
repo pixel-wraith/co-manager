@@ -169,7 +169,7 @@ trap "rm -f $temp_response $temp_prompt" EXIT
 echo "$prompt" > "$temp_prompt"
 
 # Call Claude to analyze
-claude -p "$(cat "$temp_prompt")" > "$temp_response" 2>/dev/null
+env -u CLAUDECODE claude -p "$(cat "$temp_prompt")" > "$temp_response" 2>/dev/null
 
 # Read and validate Claude's response
 response=$(cat "$temp_response")

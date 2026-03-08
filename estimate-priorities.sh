@@ -105,15 +105,17 @@ Respond with ONLY one of these priority levels (no explanation, just the word):
 - Lowest (nice to have, no urgency)"
 
     # Call Claude to estimate priority
-    priority=$(claude -p "$prompt" 2>/dev/null || echo "Medium")
+    priority=$(env -u CLAUDECODE claude -p "$prompt" 2>/dev/null || echo "Medium")
 
     # Clean up and validate the priority
     priority=$(echo "$priority" | tr -d '[:space:]' | sed 's/[^a-zA-Z]//g')
 
     # Normalize to proper case and validate
     priority_valid=false
+    priority_lower=$(echo "$priority" | tr '[:upper:]' '[:lower:]')
     for valid in "${VALID_PRIORITIES[@]}"; do
-        if [[ "${priority,,}" == "${valid,,}" ]]; then
+        valid_lower=$(echo "$valid" | tr '[:upper:]' '[:lower:]')
+        if [[ "$priority_lower" == "$valid_lower" ]]; then
             priority="$valid"
             priority_valid=true
             break
