@@ -160,6 +160,15 @@ done
 # Deduplicate issues by key (in case an issue appears in multiple sprints)
 jq '[group_by(.key)[] | .[0]]' "$FRESH_ISSUES_FILE" > "${FRESH_ISSUES_FILE}.tmp" && mv "${FRESH_ISSUES_FILE}.tmp" "$FRESH_ISSUES_FILE"
 
+# Filter out completed issues (status category "Done")
+pre_filter_count=$(jq 'length' "$FRESH_ISSUES_FILE")
+jq '[.[] | select(.fields.status.statusCategory.name != "Done")]' "$FRESH_ISSUES_FILE" > "${FRESH_ISSUES_FILE}.tmp" && mv "${FRESH_ISSUES_FILE}.tmp" "$FRESH_ISSUES_FILE"
+post_filter_count=$(jq 'length' "$FRESH_ISSUES_FILE")
+filtered_count=$((pre_filter_count - post_filter_count))
+if [[ $filtered_count -gt 0 ]]; then
+    echo "  Filtered out $filtered_count completed issues"
+fi
+
 # Get the final count
 final_count=$(jq 'length' "$FRESH_ISSUES_FILE")
 
