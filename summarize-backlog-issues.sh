@@ -44,64 +44,60 @@ if ! command -v jq &> /dev/null; then
     exit 1
 fi
 
-# Read the JSON file
+# Temp files for handling large JSON data
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
+
+UPDATED_ISSUES_FILE="${TEMP_DIR}/updated_issues.json"
+echo '[]' > "$UPDATED_ISSUES_FILE"
+
 echo "Reading issues from: $INPUT_FILE"
-json_content=$(cat "$INPUT_FILE")
 
 # Get the number of issues
-issue_count=$(echo "$json_content" | jq '.issues | length')
-unprocessed_count=$(echo "$json_content" | jq '[.issues[] | select(.__processed != true)] | length')
+issue_count=$(jq '.issues | length' "$INPUT_FILE")
+unprocessed_count=$(jq '[.issues[] | select(.__processed != true)] | length' "$INPUT_FILE")
 echo "Found $issue_count total issues ($unprocessed_count unprocessed)"
-
-# Create a temporary file for building the updated JSON
-temp_file=$(mktemp)
-trap "rm -f $temp_file" EXIT
-
-# Copy the original structure without issues
-echo "$json_content" | jq 'del(.issues)' > "$temp_file"
 
 # Process each issue
 echo "Processing issues..."
-updated_issues="[]"
 summarized_count=0
 
 for i in $(seq 0 $((issue_count - 1))); do
-    # Extract issue details
-    issue=$(echo "$json_content" | jq -c ".issues[$i]")
-    issue_key=$(echo "$issue" | jq -r '.key // "UNKNOWN"')
+    # Extract issue details to a temp file
+    issue_file="${TEMP_DIR}/issue.json"
+    jq -c ".issues[$i]" "$INPUT_FILE" > "$issue_file"
+    issue_key=$(jq -r '.key // "UNKNOWN"' "$issue_file")
 
     # Extract title (summary field in Jira)
-    title=$(echo "$issue" | jq -r '.fields.summary // "No title"')
+    title=$(jq -r '.fields.summary // "No title"' "$issue_file")
+
+    echo "  [$((i + 1))/$issue_count] Summarizing $issue_key: $title"
+
+    # Check if already processed
+    is_processed=$(jq -r '.__processed // false' "$issue_file")
+    if [[ "$is_processed" == "true" ]]; then
+        echo "    Skipping (already processed)"
+        jq --slurpfile issue "$issue_file" '. + $issue' "$UPDATED_ISSUES_FILE" > "${UPDATED_ISSUES_FILE}.tmp" && mv "${UPDATED_ISSUES_FILE}.tmp" "$UPDATED_ISSUES_FILE"
+        continue
+    fi
 
     # Extract description - handle both plain text and Atlassian Document Format (ADF)
-    # ADF stores content in .fields.description.content, plain text is just .fields.description
-    description=$(echo "$issue" | jq -r '
+    description=$(jq -r '
         if .fields.description == null then
             "No description"
         elif .fields.description | type == "string" then
             .fields.description
         elif .fields.description.content then
-            # Extract text from ADF format
             [.fields.description.content[]? | .. | .text? // empty] | join(" ")
         else
             "No description"
         end
-    ')
+    ' "$issue_file")
 
     # Truncate description if too long (to avoid token limits)
     max_desc_length=2000
     if [[ ${#description} -gt $max_desc_length ]]; then
         description="${description:0:$max_desc_length}..."
-    fi
-
-    echo "  [$((i + 1))/$issue_count] Summarizing $issue_key: $title"
-
-    # Check if already processed
-    is_processed=$(echo "$issue" | jq -r '.__processed // false')
-    if [[ "$is_processed" == "true" ]]; then
-        echo "    Skipping (already processed)"
-        updated_issues=$(echo "$updated_issues" | jq --argjson issue "$issue" '. + [$issue]')
-        continue
     fi
 
     # Build the prompt for Claude
@@ -120,24 +116,21 @@ Provide only the summary, no preamble or extra text."
     # Clean up the summary (remove leading/trailing whitespace)
     summary=$(echo "$summary" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 
-    # Add the summary to the issue
-    updated_issue=$(echo "$issue" | jq --arg summary "$summary" '. + {__summary: $summary}')
-
-    # Append to our collection
-    updated_issues=$(echo "$updated_issues" | jq --argjson issue "$updated_issue" '. + [$issue]')
+    # Add the summary to the issue and append to updated issues
+    jq --arg summary "$summary" '. + {__summary: $summary}' "$issue_file" > "${TEMP_DIR}/updated_issue.json"
+    jq --slurpfile issue "${TEMP_DIR}/updated_issue.json" '. + $issue' "$UPDATED_ISSUES_FILE" > "${UPDATED_ISSUES_FILE}.tmp" && mv "${UPDATED_ISSUES_FILE}.tmp" "$UPDATED_ISSUES_FILE"
     ((summarized_count++))
 
     echo "    Summary: ${summary:0:80}..."
 done
 
 # Rebuild the final JSON with updated issues
-final_json=$(echo "$json_content" | jq --argjson issues "$updated_issues" '.issues = $issues')
-
-# Add metadata about summarization
-final_json=$(echo "$final_json" | jq --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '. + {summarizedAt: $ts}')
+jq --slurpfile issues "$UPDATED_ISSUES_FILE" \
+    --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    '.issues = $issues[0] | . + {summarizedAt: $ts}' "$INPUT_FILE" > "${TEMP_DIR}/final.json"
 
 # Write back to the original file
-echo "$final_json" > "$INPUT_FILE"
+mv "${TEMP_DIR}/final.json" "$INPUT_FILE"
 
 echo ""
 echo "Successfully summarized $summarized_count issues (skipped $((issue_count - summarized_count)) already processed)"

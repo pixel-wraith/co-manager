@@ -47,39 +47,44 @@ if ! command -v jq &> /dev/null; then
     exit 1
 fi
 
-# Read the JSON file
+# Temp files for handling large JSON data
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
+
+UPDATED_ISSUES_FILE="${TEMP_DIR}/updated_issues.json"
+echo '[]' > "$UPDATED_ISSUES_FILE"
+
 echo "Reading issues from: $INPUT_FILE"
-json_content=$(cat "$INPUT_FILE")
 
 # Get the number of issues
-issue_count=$(echo "$json_content" | jq '.issues | length')
-unprocessed_count=$(echo "$json_content" | jq '[.issues[] | select(.__processed != true)] | length')
+issue_count=$(jq '.issues | length' "$INPUT_FILE")
+unprocessed_count=$(jq '[.issues[] | select(.__processed != true)] | length' "$INPUT_FILE")
 echo "Found $issue_count total issues ($unprocessed_count unprocessed)"
 
 # Process each issue
 echo "Estimating priorities..."
-updated_issues="[]"
 estimated_count=0
 
 for i in $(seq 0 $((issue_count - 1))); do
-    # Extract issue details
-    issue=$(echo "$json_content" | jq -c ".issues[$i]")
-    issue_key=$(echo "$issue" | jq -r '.key // "UNKNOWN"')
+    # Extract issue details to a temp file
+    issue_file="${TEMP_DIR}/issue.json"
+    jq -c ".issues[$i]" "$INPUT_FILE" > "$issue_file"
+    issue_key=$(jq -r '.key // "UNKNOWN"' "$issue_file")
 
     # Get the summary (prefer AI summary, fall back to title)
-    summary=$(echo "$issue" | jq -r '.__summary // .fields.summary // "No summary"')
-    title=$(echo "$issue" | jq -r '.fields.summary // "No title"')
+    summary=$(jq -r '.__summary // .fields.summary // "No summary"' "$issue_file")
+    title=$(jq -r '.fields.summary // "No title"' "$issue_file")
 
     # Get existing Jira priority if set
-    existing_priority=$(echo "$issue" | jq -r '.fields.priority.name // "Not set"')
+    existing_priority=$(jq -r '.fields.priority.name // "Not set"' "$issue_file")
 
     echo "  [$((i + 1))/$issue_count] Estimating priority for $issue_key"
 
     # Check if already processed
-    is_processed=$(echo "$issue" | jq -r '.__processed // false')
+    is_processed=$(jq -r '.__processed // false' "$issue_file")
     if [[ "$is_processed" == "true" ]]; then
         echo "    Skipping (already processed)"
-        updated_issues=$(echo "$updated_issues" | jq --argjson issue "$issue" '. + [$issue]')
+        jq --slurpfile issue "$issue_file" '. + $issue' "$UPDATED_ISSUES_FILE" > "${UPDATED_ISSUES_FILE}.tmp" && mv "${UPDATED_ISSUES_FILE}.tmp" "$UPDATED_ISSUES_FILE"
         continue
     fi
 
@@ -128,30 +133,27 @@ Respond with ONLY one of these priority levels (no explanation, just the word):
         priority="Medium"
     fi
 
-    # Add the priority to the issue
-    updated_issue=$(echo "$issue" | jq --arg priority "$priority" '. + {__priority: $priority}')
-
-    # Append to our collection
-    updated_issues=$(echo "$updated_issues" | jq --argjson issue "$updated_issue" '. + [$issue]')
+    # Add the priority to the issue and append to updated issues
+    jq --arg priority "$priority" '. + {__priority: $priority}' "$issue_file" > "${TEMP_DIR}/updated_issue.json"
+    jq --slurpfile issue "${TEMP_DIR}/updated_issue.json" '. + $issue' "$UPDATED_ISSUES_FILE" > "${UPDATED_ISSUES_FILE}.tmp" && mv "${UPDATED_ISSUES_FILE}.tmp" "$UPDATED_ISSUES_FILE"
     ((estimated_count++))
 
     echo "    Priority: $priority"
 done
 
 # Rebuild the final JSON with updated issues
-final_json=$(echo "$json_content" | jq --argjson issues "$updated_issues" '.issues = $issues')
-
-# Add metadata about priority estimation
-final_json=$(echo "$final_json" | jq --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '. + {prioritiesEstimatedAt: $ts}')
+jq --slurpfile issues "$UPDATED_ISSUES_FILE" \
+    --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    '.issues = $issues[0] | . + {prioritiesEstimatedAt: $ts}' "$INPUT_FILE" > "${TEMP_DIR}/final.json"
 
 # Write back to the original file
-echo "$final_json" > "$INPUT_FILE"
+mv "${TEMP_DIR}/final.json" "$INPUT_FILE"
 
 # Calculate priority distribution
 echo ""
 echo "Priority distribution:"
 for priority in "${VALID_PRIORITIES[@]}"; do
-    count=$(echo "$final_json" | jq --arg p "$priority" '[.issues[] | select(.__priority == $p)] | length')
+    count=$(jq --arg p "$priority" '[.issues[] | select(.__priority == $p)] | length' "$INPUT_FILE")
     echo "  $priority: $count"
 done
 

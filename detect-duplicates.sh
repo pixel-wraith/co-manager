@@ -44,20 +44,24 @@ if ! command -v jq &> /dev/null; then
     exit 1
 fi
 
-# Read the JSON file
+# Temp files for handling large JSON data
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
+
+WORKING_FILE="${TEMP_DIR}/working.json"
+cp "$INPUT_FILE" "$WORKING_FILE"
+
 echo "Reading issues from: $INPUT_FILE"
-json_content=$(cat "$INPUT_FILE")
 
 # Get issue counts
-issue_count=$(echo "$json_content" | jq '.issues | length')
-unprocessed_count=$(echo "$json_content" | jq '[.issues[] | select(.__processed != true)] | length')
+issue_count=$(jq '.issues | length' "$WORKING_FILE")
+unprocessed_count=$(jq '[.issues[] | select(.__processed != true)] | length' "$WORKING_FILE")
 echo "Found $issue_count total issues ($unprocessed_count unprocessed)"
 
 # First, clean up stale references from existing issues
 echo "Cleaning up stale references..."
-all_issue_keys=$(echo "$json_content" | jq -c '[.issues[].key]')
-
-json_content=$(echo "$json_content" | jq --argjson valid_keys "$all_issue_keys" '
+jq '
+    ([.issues[].key]) as $valid_keys |
     .issues = [.issues[] |
         # Clean up duplicates array - remove IDs that no longer exist
         if .duplicates then
@@ -84,13 +88,13 @@ json_content=$(echo "$json_content" | jq --argjson valid_keys "$all_issue_keys" 
             .
         end
     ]
-')
+' "$WORKING_FILE" > "${WORKING_FILE}.tmp" && mv "${WORKING_FILE}.tmp" "$WORKING_FILE"
 
 # Check if we have unprocessed issues to analyze
 if [[ $unprocessed_count -eq 0 ]]; then
     echo "No unprocessed issues to analyze."
     # Still write back to save any stale reference cleanup
-    echo "$json_content" > "$INPUT_FILE"
+    cp "$WORKING_FILE" "$INPUT_FILE"
     echo "Updated file: $INPUT_FILE"
     exit 0
 fi
@@ -100,37 +104,30 @@ if [[ $issue_count -lt 2 ]]; then
     exit 0
 fi
 
-# Extract unprocessed issues (the ones we need to analyze)
-echo "Extracting unprocessed issues for analysis..."
-unprocessed_issues=$(echo "$json_content" | jq -r '
-    [.issues[] | select(.__processed != true)] | to_entries | map({
-        index: .key,
-        id: .value.key,
-        summary: (.value.__summary // .value.fields.summary // "No summary available"),
-        is_new: true
-    })
-')
+# Extract issue data for the prompt into temp files
+echo "Extracting issues for analysis..."
+unprocessed_file="${TEMP_DIR}/unprocessed.json"
+all_context_file="${TEMP_DIR}/all_context.json"
 
-# Extract all issues (for comparison context)
-all_issues_for_context=$(echo "$json_content" | jq -r '
-    .issues | to_entries | map({
-        index: .key,
-        id: .value.key,
-        summary: (.value.__summary // .value.fields.summary // "No summary available"),
-        is_new: (if .value.__processed == true then false else true end)
-    })
-')
+jq '[.issues[] | select(.__processed != true) | {id: .key, summary: (.__summary // .fields.summary // "No summary available"), is_new: true}]' "$WORKING_FILE" > "$unprocessed_file"
+jq '[.issues[] | {id: .key, summary: (.__summary // .fields.summary // "No summary available"), is_new: (if .__processed == true then false else true end)}]' "$WORKING_FILE" > "$all_context_file"
 
 # Build the prompt for Claude
 echo "Analyzing unprocessed issues for duplicates and overlaps..."
 
-prompt="You are analyzing Jira issues to identify duplicates and overlaps.
+prompt_file="${TEMP_DIR}/prompt.txt"
+cat > "$prompt_file" <<'PROMPT_HEADER'
+You are analyzing Jira issues to identify duplicates and overlaps.
 
 Here are ALL issues in the backlog (for context):
-$all_issues_for_context
+PROMPT_HEADER
+cat "$all_context_file" >> "$prompt_file"
+cat >> "$prompt_file" <<'PROMPT_MID'
 
 Here are the NEW/UNPROCESSED issues that need to be checked:
-$unprocessed_issues
+PROMPT_MID
+cat "$unprocessed_file" >> "$prompt_file"
+cat >> "$prompt_file" <<'PROMPT_FOOTER'
 
 Analyze the NEW/UNPROCESSED issues and identify:
 1. DUPLICATES: Where a new issue duplicates ANY other issue (new or existing)
@@ -138,16 +135,16 @@ Analyze the NEW/UNPROCESSED issues and identify:
 
 Return your analysis as valid JSON in this exact format (no markdown, no code blocks, just raw JSON):
 {
-  \"duplicates\": [
+  "duplicates": [
     {
-      \"ids\": [\"ISSUE-1\", \"ISSUE-2\"],
-      \"reason\": \"Brief explanation of why these are duplicates\"
+      "ids": ["ISSUE-1", "ISSUE-2"],
+      "reason": "Brief explanation of why these are duplicates"
     }
   ],
-  \"overlaps\": [
+  "overlaps": [
     {
-      \"ids\": [\"ISSUE-3\", \"ISSUE-4\"],
-      \"details\": \"Description of how these issues overlap or relate\"
+      "ids": ["ISSUE-3", "ISSUE-4"],
+      "details": "Description of how these issues overlap or relate"
     }
   ]
 }
@@ -156,45 +153,39 @@ Rules:
 - Only include relationships where AT LEAST ONE issue is from the NEW/UNPROCESSED list
 - Only include actual duplicates and overlaps you're confident about
 - Each issue can appear in multiple duplicate/overlap groups if applicable
-- If no duplicates are found, return an empty array for \"duplicates\"
-- If no overlaps are found, return an empty array for \"overlaps\"
-- Return ONLY the JSON object, nothing else"
-
-# Create temp file for Claude's response
-temp_response=$(mktemp)
-temp_prompt=$(mktemp)
-trap "rm -f $temp_response $temp_prompt" EXIT
-
-# Write prompt to temp file to avoid shell escaping issues
-echo "$prompt" > "$temp_prompt"
+- If no duplicates are found, return an empty array for "duplicates"
+- If no overlaps are found, return an empty array for "overlaps"
+- Return ONLY the JSON object, nothing else
+PROMPT_FOOTER
 
 # Call Claude to analyze
-env -u CLAUDECODE claude -p "$(cat "$temp_prompt")" > "$temp_response" 2>/dev/null
+response_file="${TEMP_DIR}/response.json"
+env -u CLAUDECODE claude -p "$(cat "$prompt_file")" > "$response_file" 2>/dev/null
 
-# Read and validate Claude's response
-response=$(cat "$temp_response")
-
-# Try to extract JSON from the response (in case Claude wrapped it)
-# First try to parse as-is, then try to extract from code blocks
-if ! echo "$response" | jq -e '.' > /dev/null 2>&1; then
-    # Try to extract JSON from markdown code block
-    response=$(echo "$response" | sed -n '/^{/,/^}/p' | head -1)
-    if ! echo "$response" | jq -e '.' > /dev/null 2>&1; then
+# Validate Claude's response
+if ! jq -e '.' "$response_file" > /dev/null 2>&1; then
+    # Try to extract JSON from response
+    sed -n '/^{/,/^}/p' "$response_file" > "${response_file}.clean"
+    if jq -e '.' "${response_file}.clean" > /dev/null 2>&1; then
+        mv "${response_file}.clean" "$response_file"
+    else
         echo "Error: Failed to parse Claude's response as JSON"
         echo "Raw response:"
-        cat "$temp_response"
+        cat "$response_file"
         exit 1
     fi
 fi
 
 echo "Analysis complete. Processing results..."
 
-# Extract duplicates and overlaps
-duplicates=$(echo "$response" | jq -c '.duplicates // []')
-overlaps=$(echo "$response" | jq -c '.overlaps // []')
+# Extract duplicate and overlap counts
+duplicates_file="${TEMP_DIR}/duplicates.json"
+overlaps_file="${TEMP_DIR}/overlaps.json"
+jq -c '.duplicates // []' "$response_file" > "$duplicates_file"
+jq -c '.overlaps // []' "$response_file" > "$overlaps_file"
 
-duplicate_count=$(echo "$duplicates" | jq 'length')
-overlap_count=$(echo "$overlaps" | jq 'length')
+duplicate_count=$(jq 'length' "$duplicates_file")
+overlap_count=$(jq 'length' "$overlaps_file")
 
 echo "  Found $duplicate_count duplicate groups"
 echo "  Found $overlap_count overlap groups"
@@ -202,7 +193,10 @@ echo "  Found $overlap_count overlap groups"
 # Process the issues and merge new relationship data with existing
 echo "Updating issues with relationship metadata..."
 
-updated_json=$(echo "$json_content" | jq --argjson dups "$duplicates" --argjson overlaps "$overlaps" '
+jq --slurpfile dups "$duplicates_file" --slurpfile overlaps "$overlaps_file" '
+    ($dups[0]) as $dups |
+    ($overlaps[0]) as $overlaps |
+
     # Build duplicate map: issue_id -> [other_ids]
     def build_duplicate_map:
         reduce $dups[] as $group ({};
@@ -244,10 +238,10 @@ updated_json=$(echo "$json_content" | jq --argjson dups "$duplicates" --argjson 
     ] |
     # Add metadata about duplicate detection
     . + {duplicatesAnalyzedAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))}
-')
+' "$WORKING_FILE" > "${WORKING_FILE}.tmp" && mv "${WORKING_FILE}.tmp" "$WORKING_FILE"
 
 # Write back to the original file
-echo "$updated_json" > "$INPUT_FILE"
+cp "$WORKING_FILE" "$INPUT_FILE"
 
 echo ""
 echo "Successfully analyzed $unprocessed_count unprocessed issues against $issue_count total"
@@ -259,11 +253,11 @@ echo "Updated file: $INPUT_FILE"
 if [[ $duplicate_count -gt 0 ]]; then
     echo ""
     echo "Duplicate groups:"
-    echo "$duplicates" | jq -r '.[] | "  - \(.ids | join(", ")): \(.reason)"'
+    jq -r '.[] | "  - \(.ids | join(", ")): \(.reason)"' "$duplicates_file"
 fi
 
 if [[ $overlap_count -gt 0 ]]; then
     echo ""
     echo "Overlap groups:"
-    echo "$overlaps" | jq -r '.[] | "  - \(.ids | join(", ")): \(.details)"'
+    jq -r '.[] | "  - \(.ids | join(", ")): \(.details)"' "$overlaps_file"
 fi
