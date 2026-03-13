@@ -1,6 +1,6 @@
 # Co-Manager
 
-A toolset for analyzing Jira backlogs using AI to generate summaries and detect duplicate or overlapping issues.
+Co-Manager is an AI-powered Jira backlog analysis pipeline. Given a Jira board ID, it fetches all issues from active and future sprints, then uses Claude to generate concise summaries, estimate priorities, and detect duplicate or overlapping issues. The pipeline is incremental — it only processes new or changed issues on subsequent runs, making it efficient to run regularly. All results are stored locally as enriched JSON, giving you a quick, AI-augmented view of your backlog without modifying anything in Jira.
 
 ## Prerequisites
 
@@ -85,6 +85,44 @@ This will:
 3. Estimate priority for each issue
 4. Detect duplicates and overlapping issues
 5. Output results to `~/.co-manager/<BOARD_ID>-backlog-issues.json`
+
+## How the Pipeline Works
+
+The main entry point is `process-backlog.sh`, which orchestrates five sequential steps. Each step reads and writes to a single JSON file at `~/.co-manager/<BOARD_ID>-backlog-issues.json`.
+
+### Step 1: Fetch Backlog Issues from Jira
+
+The pipeline queries the Jira Agile REST API to discover all active and future sprints for the given board, then paginates through each sprint to collect every issue. Issues that appear in multiple sprints are deduplicated by key, and completed issues (status category "Done") are filtered out.
+
+If a local JSON file already exists from a previous run, the fresh data is merged with it:
+- **New issues** (not seen before) are added and marked as unprocessed.
+- **Changed issues** (where `fields.updated` differs from the local copy) have their AI-generated metadata cleared so they will be re-analyzed.
+- **Unchanged issues** retain all previously generated summaries, priorities, and relationship data.
+- **Removed issues** (present locally but no longer in Jira) are dropped from the file.
+
+### Step 2: Generate AI Summaries
+
+Each unprocessed issue is sent to Claude (via the `claude` CLI) with its title and description. Claude returns a 1–2 sentence summary focusing on what needs to be done and why. The summary is stored as the `__summary` property on the issue.
+
+Descriptions in Atlassian Document Format (ADF) are flattened to plain text before prompting. Long descriptions are truncated to 2,000 characters to stay within token limits.
+
+### Step 3: Estimate Priorities
+
+Each unprocessed issue is sent to Claude with its title, AI summary, and current Jira priority. Claude evaluates factors like business impact, number of users affected, blocking potential, security implications, and technical debt to return one of five priority levels: Highest, High, Medium, Low, or Lowest. The result is stored as `__priority`. Invalid responses default to Medium.
+
+### Step 4: Detect Duplicates and Overlaps
+
+All unprocessed issues are compared against the entire backlog (both new and previously processed issues) in a single Claude prompt. Claude identifies two kinds of relationships:
+- **Duplicates** — issues that describe the same work.
+- **Overlaps** — issues that are distinct but share related scope, with a description of how they relate.
+
+Relationships are stored bidirectionally: both sides of a duplicate or overlap pair are updated. Stale references (pointing to issues that no longer exist in the backlog) are cleaned up before the analysis runs.
+
+### Step 5: Mark Issues as Processed
+
+All issues that were analyzed in steps 2–4 are marked with `__processed: true` and a `processedAt` timestamp is added to the file. On the next run, these issues will be skipped unless their content has changed in Jira.
+
+The pipeline finishes with a summary report showing totals for issues fetched, summaries generated, priority distribution, and duplicate/overlap relationships found.
 
 ## Scripts
 

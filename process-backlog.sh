@@ -7,6 +7,7 @@
 #   2. Generate AI summaries for each issue
 #   3. Estimate priority for each issue
 #   4. Detect duplicates and overlapping issues
+#   5. Generate implementation plans with technical notes and testing requirements
 #
 # Required environment variables:
 #   JIRA_BASE_URL  - Your Jira instance URL (e.g., https://yourcompany.atlassian.net)
@@ -164,10 +165,34 @@ echo "----------------------------------------------"
 echo ""
 
 # ---------------------------------------------
-# Step 5: Mark processed issues
+# Step 5: Generate implementation plans
 # ---------------------------------------------
 echo "=============================================="
-echo "  Step 5: Marking Issues as Processed"
+echo "  Step 5: Generating Implementation Plans"
+echo "=============================================="
+echo ""
+
+"${SCRIPT_DIR}/write-full-ticket.sh" "$OUTPUT_FILE"
+
+# Print summary for Step 5
+plans_generated=$(jq '[.issues[] | select(._description != null)] | length' "$OUTPUT_FILE")
+missing_info=$(jq '[.issues[] | select(._status == "missing-information")] | length' "$OUTPUT_FILE")
+ready_for_review=$(jq '[.issues[] | select(._status == "ready-for-manager-review")] | length' "$OUTPUT_FILE")
+echo ""
+echo "----------------------------------------------"
+echo "  STEP 5 SUMMARY"
+echo "----------------------------------------------"
+echo "  Plans generated:          $plans_generated"
+echo "  Missing information:      $missing_info"
+echo "  Ready for manager review: $ready_for_review"
+echo "----------------------------------------------"
+echo ""
+
+# ---------------------------------------------
+# Step 6: Mark processed issues
+# ---------------------------------------------
+echo "=============================================="
+echo "  Step 6: Marking Issues as Processed"
 echo "=============================================="
 echo ""
 
@@ -180,7 +205,7 @@ jq '.issues = [.issues[] | if .__processed != true then . + {__processed: true} 
 echo "Marked $unprocessed_before issues as processed"
 echo ""
 echo "----------------------------------------------"
-echo "  STEP 5 SUMMARY"
+echo "  STEP 6 SUMMARY"
 echo "----------------------------------------------"
 echo "  Newly processed issues: $unprocessed_before"
 echo "----------------------------------------------"
@@ -199,6 +224,8 @@ echo "  Newly processed:           $unprocessed_before"
 echo "  Previously processed:      $processed_issues"
 echo "  Duplicate relationships:   $total_duplicate_relationships"
 echo "  Overlap relationships:     $total_overlap_relationships"
+echo "  Plans generated:           $plans_generated"
+echo "  Ready for manager review:  $ready_for_review"
 echo ""
 echo "  Priority breakdown:"
 echo "    Highest: $priority_highest | High: $priority_high | Medium: $priority_medium | Low: $priority_low | Lowest: $priority_lowest"
